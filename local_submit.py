@@ -21,7 +21,6 @@ REPOSITORY_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_ROOT = REPOSITORY_ROOT / "data" / "competition"
 DEFAULT_RUNS_ROOT = SCRIPT_DIR / "runs"
 DEFAULT_REQUIREMENTS_DIR = SCRIPT_DIR / "public-exercise" / "requirements"
-DEFAULT_TESTS_DIR = SCRIPT_DIR / "public-exercise" / "tests"
 DEFAULT_IMAGE = "arcbench-local-submit:latest"
 EXCLUDED_BASELINE_PARTS = {".arc", ".git", "requirements", "node_modules", ".cache", "dist", "build"}
 PASSTHROUGH_ENVIRONMENT = (
@@ -188,15 +187,13 @@ def validate_agent_entrypoint(submission_dir: Path) -> None:
 
 def assemble_workspace(args: argparse.Namespace) -> tuple[Path, str]:
     data_root = Path(args.data_root).resolve()
-    if bool(args.requirements_dir) != bool(args.tests_dir):
-        raise LocalSubmitError("--requirements-dir and --tests-dir must be provided together")
-    if args.requirements_dir and args.tests_dir:
+    if args.requirements_dir:
         task_name = args.task
         requirements_root = Path(args.requirements_dir).resolve()
-        tests_root = Path(args.tests_dir).resolve()
         if not requirements_root.is_dir():
             raise LocalSubmitError(f"Requirements directory does not exist: {requirements_root}")
-        if not tests_root.is_dir():
+        tests_root = Path(args.tests_dir).resolve() if args.tests_dir else None
+        if tests_root is not None and not tests_root.is_dir():
             raise LocalSubmitError(f"Tests directory does not exist: {tests_root}")
     else:
         task_name, requirements_root, tests_root = resolve_task(
@@ -231,7 +228,9 @@ def assemble_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         copy_baseline(Path(args.template), template_dir)
 
     copy_requirements(requirements_root, requirements_dir)
-    shutil.copytree(tests_root, tests_dir, dirs_exist_ok=True, symlinks=False)
+    evaluation_enabled = tests_root is not None
+    if tests_root is not None:
+        shutil.copytree(tests_root, tests_dir, dirs_exist_ok=True, symlinks=False)
 
     requirement_id = f"{args.competition}--{task_name.rsplit('/', 1)[-1]}"
     runner_spec = {
@@ -246,6 +245,7 @@ def assemble_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         "output_dir": "/workspace/template",
         "runner_events_path": ".arc/runner-events.jsonl",
         "traceability_dir": ".arc/traceability",
+        "evaluation_enabled": evaluation_enabled,
         "task": {
             "category": "web",
             "requirement_id": requirement_id,
@@ -267,6 +267,9 @@ def assemble_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         "runtime": "python",
         "agent": str(Path(args.agent).resolve()),
         "template": str(Path(args.template).resolve()) if args.template else None,
+        "requirements_dir": str(requirements_root),
+        "tests_dir": str(tests_root) if tests_root is not None else None,
+        "evaluation_enabled": evaluation_enabled,
         "image": args.image,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -386,6 +389,25 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
 
     run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.is_file() else {}
     execution = json.loads(execution_path.read_text(encoding="utf-8")) if execution_path.is_file() else {}
+    submission_path = workspace / "local-submission.json"
+    submission = json.loads(submission_path.read_text(encoding="utf-8")) if submission_path.is_file() else {}
+    if submission.get("evaluation_enabled") is False:
+        result = {
+            "workspace": str(workspace),
+            "container_exit_code": run.get("container_exit_code"),
+            "agent_duration_seconds": execution.get("duration_seconds"),
+            "evaluation_status": "skipped",
+            "playwright_report": None,
+            "stdout_log": str(workspace / "template" / ".arc" / "stdout.log"),
+            "debug_log": str(workspace / "execution.debug.log"),
+        }
+        (workspace / "local-result.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print("Playwright evaluation was skipped because no --tests-dir was provided.")
+        return 0 if run.get("container_exit_code") == 0 else 1
     if not report_path.is_file():
         print("No Playwright report was produced.")
         print(f"Container exit code: {run.get('container_exit_code', 'unknown')}")
@@ -409,6 +431,7 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
         "workspace": str(workspace),
         "container_exit_code": run.get("container_exit_code"),
         "agent_duration_seconds": execution.get("duration_seconds"),
+        "evaluation_status": "completed",
         "passed": passed,
         "failed": failed,
         "total": len(tests),
@@ -473,8 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--tests-dir",
-        default=str(DEFAULT_TESTS_DIR),
-        help="Public Playwright tests directory",
+        help="Optional public Playwright tests directory; omit it to skip evaluation",
     )
     run_parser.add_argument("--image", default=os.environ.get("ARCBENCH_LOCAL_IMAGE", DEFAULT_IMAGE))
     run_parser.add_argument("--env-file", help="Docker env file containing model settings; do not commit it")

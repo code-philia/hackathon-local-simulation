@@ -1,6 +1,6 @@
 # ARC-Bench 本地模拟提交环境
 
-这个目录用于让选手在本地完成一次与竞赛平台核心运行阶段一致的模拟提交：运行上传的智能体、部署智能体生成的应用，并对 `http://127.0.0.1:3000` 执行 Playwright 测试。
+这个目录用于让选手在本地完成一次与竞赛平台核心运行阶段一致的模拟提交：运行上传的智能体、部署智能体生成的应用，并可选择对 `http://127.0.0.1:3000` 执行 Playwright 测试。
 
 它不模拟登录、数据库、排队、排行榜等网站功能。
 
@@ -196,20 +196,39 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
 |---|---|
 | `--agent` | 智能体 `.zip` 的绝对或相对路径 |
 | `--requirements-dir` | 包含 `requirements.yaml` 和可选 `reference/` 的需求目录 |
-| `--tests-dir` | 包含全部公开 Playwright 测试的目录 |
+| `--tests-dir` | 可选；包含全部公开 Playwright 测试的目录。不传时不执行评测 |
 | `--output-dir` | 本机保存 Workspace、生成应用、日志和测试结果的空目录 |
 | `--env-file` | 可选的模型环境变量文件 |
 | `--image` | 可选；默认 `arcbench-local-submit:latest` |
 
 输出目录必须不存在或为空，工具不会覆盖以前的结果。
 
-如果不填写练习题路径，默认就使用包内的 Counter：
+如果不填写需求路径，默认使用包内 Counter 的需求。下面的命令没有指定 `--tests-dir`，因此只运行智能体并部署应用，不执行 Playwright：
 
 ```bash
 ./local-submit/submit.sh \
   --agent /absolute/path/to/my-agent.zip \
   --output-dir "$PWD/local-submit/runs/counter-run-001" \
   --env-file "$PWD/local-submit/.env"
+```
+
+也可以显式指定需求目录但不指定测试目录：
+
+```bash
+./local-submit/submit.sh \
+  --agent /absolute/path/to/my-agent.zip \
+  --requirements-dir /absolute/path/to/practice/requirements \
+  --output-dir "$PWD/local-submit/runs/deploy-only" \
+  --env-file "$PWD/local-submit/.env"
+```
+
+此模式仍会完整执行智能体、执行 `deploy.sh` 或默认部署流程，并等待应用在 `127.0.0.1:3000` 就绪；确认部署成功后跳过 Playwright 并结束容器。`local-result.json` 中会记录：
+
+```json
+{
+  "evaluation_status": "skipped",
+  "playwright_report": null
+}
 ```
 
 只组装输入、不启动 Docker：
@@ -234,15 +253,15 @@ counter-run-001/
 │   └── .arc/
 │       ├── stdout.log
 │       ├── agent-execution.json
-│       └── playwright-report.json
-├── tests/                              # 本次测试快照
+│       └── playwright-report.json      # 仅在提供测试并完成评测时生成
+├── tests/                              # 未提供测试时为空
 ├── runner-spec.json
 ├── execution.debug.log
 ├── local-run.json
 └── local-result.json
 ```
 
-终端会直接打印 passed、failed、测试通过率和功能实现率。之后可以重新查看：
+提供测试时，终端会打印 passed、failed、测试通过率和功能实现率；未提供测试时，终端会明确显示 `evaluation_status: skipped`。之后可以重新查看：
 
 ```bash
 ./local-submit/result.sh \
@@ -289,7 +308,7 @@ python3 -m pip install -r /workspace/submission/requirements.txt
 ```text
 /workspace/template                   # 智能体的最终输出目录
 /workspace/template/requirements      # 需求文档
-/workspace/tests                      # Playwright 测试
+/workspace/tests                      # 可选的 Playwright 测试；未提供时为空
 ```
 
 为避免智能体修改原始需求，Runner 再把需求复制为本次只读语义的快照：
@@ -442,11 +461,11 @@ HOST=0.0.0.0 PORT=3000 npm run start
 http://127.0.0.1:3000 可访问
 ```
 
-Runner 最多等待 120 秒；获得小于 500 的 HTTP 响应后才开始测试。
+Runner 最多等待 120 秒。获得小于 500 的 HTTP 响应后，如果提供了测试目录则开始评测；如果没有提供测试目录，则记录部署成功并跳过评测。
 
 ### 3.4 执行 Playwright
 
-应用 ready 后，平台强制生成 Playwright 配置：
+本节只适用于传入 `--tests-dir` 的运行。应用 ready 后，平台强制生成 Playwright 配置：
 
 ```text
 baseURL:       http://127.0.0.1:3000

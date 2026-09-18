@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -96,12 +97,55 @@ def install_deploy_script_contract(runner) -> None:
     runner.run_web_template = run_web_template
 
 
+def install_optional_evaluation_contract(runner) -> None:
+    try:
+        runner_spec = json.loads(runner.SPEC_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if runner_spec.get("evaluation_enabled", True) is not False:
+        return
+
+    def skip_write_playwright_config(_base_url: str) -> None:
+        runner.append_runner_event(
+            "run_tests",
+            "No test input was provided; Playwright evaluation will be skipped",
+            status="info",
+        )
+        runner.append_debug_log("Skipping Playwright configuration because evaluation_enabled=false")
+
+    def skip_test_package(_stdout_file, _stderr_file) -> None:
+        return None
+
+    def skip_playwright(_stdout_file, _stderr_file) -> subprocess.CompletedProcess:
+        runner.append_runner_event(
+            "run_tests",
+            "Application deployment completed without evaluation",
+            status="success",
+        )
+        return subprocess.CompletedProcess(["playwright", "skipped"], returncode=0)
+
+    def skipped_results() -> dict:
+        return {
+            "passed": 0,
+            "failed": 0,
+            "score": 0.0,
+            "duration_seconds": 0.0,
+            "tests": [],
+            "evaluation_status": "skipped",
+        }
+
+    runner.write_playwright_config = skip_write_playwright_config
+    runner.ensure_test_package = skip_test_package
+    runner.run_playwright_tests_with_progress = skip_playwright
+    runner.parse_playwright_results = skipped_results
+
+
 def main() -> int:
     runner = load_production_runner()
     install_deploy_script_contract(runner)
+    install_optional_evaluation_contract(runner)
     return int(runner.main())
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
