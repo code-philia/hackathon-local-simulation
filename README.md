@@ -7,7 +7,7 @@
 ## 1. 本地环境包包含什么
 
 ```text
-local-submit/
+hackathon-local-simulation/
 ├── public-exercise/
 │   ├── requirements/
 │   │   ├── requirements.yaml       # 机器可读需求，必须存在
@@ -62,16 +62,16 @@ python3 --version
 
 ### 2.2 构建本地模拟竞赛镜像
 
-在 ARC-Bench 仓库根目录执行：
+基础 Runner 镜像由 ARC-Bench 网站仓库的 `backend/runner/Dockerfile` 构建，**那个仓库不在本仓库里**。用 `ARCBENCH_MONOREPO_ROOT` 指向你的 checkout：
 
 ```bash
-chmod +x local-submit/build-image.sh
-./local-submit/build-image.sh
+chmod +x build-image.sh
+ARCBENCH_MONOREPO_ROOT=/path/to/arc-bench-website ./build-image.sh
 ```
 
 构建脚本会：
 
-1. 使用平台的 `backend/runner/Dockerfile` 创建基础 Runner；
+1. 使用 `$ARCBENCH_MONOREPO_ROOT/backend/runner/Dockerfile` 创建基础 Runner；
 2. 执行 smoke test，确认 Python、Node.js、Git、Playwright 和 Chromium 可用；
 3. 创建本地镜像：
 
@@ -85,13 +85,36 @@ chmod +x local-submit/build-image.sh
 docker image inspect arcbench-local-submit:latest
 ```
 
-如果组织者已经发布镜像，选手也可以直接拉取：
+如果组织者已经发布镜像，选手可以直接拉取，并打上脚本期望的 tag，之后无需再设置 `ARCBENCH_MONOREPO_ROOT`：
 
 ```bash
 docker pull registry.example.com/arcbench/local-submit:v1
+docker tag  registry.example.com/arcbench/local-submit:v1 arcbench-runner:local-base
+./build-image.sh
 ```
 
-运行时通过 `--image registry.example.com/arcbench/local-submit:v1` 指定。
+运行时也可以通过 `--image registry.example.com/arcbench/local-submit:v1` 直接指定已有镜像。
+
+#### Apple Silicon（arm64）注意
+
+`backend/runner/Dockerfile` 目前下载的是写死的 `linux-x64` Node.js 压缩包。在 arm64 主机上，Playwright 基础镜像会解析成 arm64，这个 x64 的 Node 无法执行，构建会在大约九分钟后失败：
+
+```text
+qemu-x86_64: Could not open '/lib64/ld-linux-x86-64.so.2'
+```
+
+`build-image.sh` 会在开始构建前就检测到这个组合并直接报错，而不是让你白等。两种解法：
+
+```bash
+# 1. 用模拟方式按 amd64 构建（当下可用，较慢）
+ARCBENCH_LOCAL_PLATFORM=linux/amd64 \
+ARCBENCH_MONOREPO_ROOT=/path/to/arc-bench-website ./build-image.sh
+
+# 2. 把上游 Dockerfile 的 Node 下载改成架构自适应（原生，推荐）
+#    使用 dpkg --print-architecture 在 x64 / arm64 之间分支
+```
+
+注意正式评测环境是 x86_64。在 arm64 上原生构建足以验证运行契约，但涉及原生模块（`sharp`、`canvas`、`better-sqlite3` 等）时行为可能与正式评测不同。
 
 ### 2.3 编写并打包自己的智能体
 
@@ -160,8 +183,8 @@ unzip -l ../my-agent.zip | head
 ### 2.4 准备模型环境变量
 
 ```bash
-cp local-submit/env.example local-submit/.env
-chmod 600 local-submit/.env
+cp env.example .env
+chmod 600 .env
 ```
 
 填写智能体需要的配置：
@@ -182,12 +205,12 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
 显式指定 Agent ZIP、需求目录、测试目录和本机输出目录：
 
 ```bash
-./local-submit/submit.sh \
+./submit.sh \
   --agent /absolute/path/to/my-agent.zip \
-  --requirements-dir "$PWD/local-submit/public-exercise/requirements" \
-  --tests-dir "$PWD/local-submit/public-exercise/tests" \
-  --output-dir "$PWD/local-submit/runs/counter-run-001" \
-  --env-file "$PWD/local-submit/.env"
+  --requirements-dir "$PWD/public-exercise/requirements" \
+  --tests-dir "$PWD/public-exercise/tests" \
+  --output-dir "$PWD/runs/counter-run-001" \
+  --env-file "$PWD/.env"
 ```
 
 参数说明：
@@ -206,20 +229,20 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
 如果不填写需求路径，默认使用包内 Counter 的需求。下面的命令没有指定 `--tests-dir`，因此只运行智能体并部署应用，不执行 Playwright：
 
 ```bash
-./local-submit/submit.sh \
+./submit.sh \
   --agent /absolute/path/to/my-agent.zip \
-  --output-dir "$PWD/local-submit/runs/counter-run-001" \
-  --env-file "$PWD/local-submit/.env"
+  --output-dir "$PWD/runs/counter-run-001" \
+  --env-file "$PWD/.env"
 ```
 
 也可以显式指定需求目录但不指定测试目录：
 
 ```bash
-./local-submit/submit.sh \
+./submit.sh \
   --agent /absolute/path/to/my-agent.zip \
   --requirements-dir /absolute/path/to/practice/requirements \
-  --output-dir "$PWD/local-submit/runs/deploy-only" \
-  --env-file "$PWD/local-submit/.env"
+  --output-dir "$PWD/runs/deploy-only" \
+  --env-file "$PWD/.env"
 ```
 
 此模式仍会完整执行智能体、执行 `deploy.sh` 或默认部署流程，并等待应用在 `127.0.0.1:3000` 就绪；确认部署成功后跳过 Playwright 并结束容器。`local-result.json` 中会记录：
@@ -234,9 +257,9 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
 只组装输入、不启动 Docker：
 
 ```bash
-./local-submit/submit.sh \
+./submit.sh \
   --agent /absolute/path/to/my-agent.zip \
-  --output-dir "$PWD/local-submit/runs/inspect-only" \
+  --output-dir "$PWD/runs/inspect-only" \
   --prepare-only
 ```
 
@@ -264,16 +287,16 @@ counter-run-001/
 提供测试时，终端会打印 passed、failed、测试通过率和功能实现率；未提供测试时，终端会明确显示 `evaluation_status: skipped`。之后可以重新查看：
 
 ```bash
-./local-submit/result.sh \
-  --workspace "$PWD/local-submit/runs/counter-run-001" \
+./result.sh \
+  --workspace "$PWD/runs/counter-run-001" \
   --show-tests
 ```
 
 发生错误时首先查看：
 
 ```bash
-less local-submit/runs/counter-run-001/execution.debug.log
-less local-submit/runs/counter-run-001/template/.arc/stdout.log
+less runs/counter-run-001/execution.debug.log
+less runs/counter-run-001/template/.arc/stdout.log
 ```
 
 ## 3. 竞赛平台依次做了什么
@@ -348,13 +371,27 @@ python3 /workspace/submission/main.py \
 
 #### 路径 A：自定义 `deploy.sh`
 
+> **⚠️ 这条路径目前只有本地模拟环境支持，正式评测平台不支持。**
+>
+> `deploy.sh` 分支由本地镜像的 `local_runner.py` 以 monkey-patch 方式加在生产 Runner 之上。正式评测使用的 `run_submission.py` **没有这个分支**：它的 `run_web_template()` 无条件要求输出根目录存在 `frontend/` 和 `backend/`，缺任何一个就直接抛
+>
+> ```text
+> web template is incomplete: expected frontend/ and backend/ directories
+> ```
+>
+> 流程会停在 `Running agent` 阶段，**一个测试都不会执行**。
+>
+> 也就是说：一个只产出 `deploy.sh` 的智能体在本地可以拿满分，正式提交却会零分，而且错误信息不会提示原因。
+>
+> **在上游把这条契约同步到正式 Runner 之前，请使用下面的路径 B。**
+
 如果输出根目录存在：
 
 ```text
 /workspace/template/deploy.sh
 ```
 
-平台不会再要求 `frontend/` 和 `backend/`，也不会执行固定的 npm 命令，而是执行：
+本地模拟环境不会再要求 `frontend/` 和 `backend/`，也不会执行固定的 npm 命令，而是执行：
 
 ```bash
 cd /workspace/template
@@ -388,12 +425,12 @@ exec python3 server.py --host 0.0.0.0 --port "${PORT:-3000}"
 本地镜像通过 `/opt/arcbench/local_runner.py` 明确实现这项契约。它会在进入默认部署流程前检查 `deploy.sh`；因此这不是文档约定或伪代码，而是本地模拟环境实际执行的分支。修改本地 Runner 或首次获取此功能后，需要重新构建镜像：
 
 ```bash
-./local-submit/build-image.sh
+./build-image.sh
 ```
 
 #### 使用包内示例验证 deploy.sh
 
-`local-submit/examples/custom-deploy-agent/` 提供了一个最小示例。该智能体不生成 `frontend/` 和 `backend/`，只生成：
+`examples/custom-deploy-agent/` 提供了一个最小示例。该智能体不生成 `frontend/` 和 `backend/`，只生成：
 
 ```text
 <output-dir>/
@@ -406,7 +443,7 @@ exec python3 server.py --host 0.0.0.0 --port "${PORT:-3000}"
 将示例打包：
 
 ```bash
-cd local-submit/examples/custom-deploy-agent
+cd examples/custom-deploy-agent
 zip -r /tmp/custom-deploy-agent.zip main.py requirements.txt
 cd ../../..
 ```
@@ -414,11 +451,11 @@ cd ../../..
 然后使用公开练习题运行：
 
 ```bash
-./local-submit/submit.sh \
+./submit.sh \
   --agent /tmp/custom-deploy-agent.zip \
-  --requirements-dir "$PWD/local-submit/public-exercise/requirements" \
-  --tests-dir "$PWD/local-submit/public-exercise/tests" \
-  --output-dir "$PWD/local-submit/runs/custom-deploy-example"
+  --requirements-dir "$PWD/public-exercise/requirements" \
+  --tests-dir "$PWD/public-exercise/tests" \
+  --output-dir "$PWD/runs/custom-deploy-example"
 ```
 
 日志中出现以下信息，表示 Runner 选择了自定义部署路径：
@@ -502,7 +539,7 @@ Playwright 与目标应用位于同一个 Docker 容器，因此这里的 `127.0
 
 ## 4. 竞赛环境信息
 
-本地镜像由 [backend/runner/Dockerfile](../backend/runner/Dockerfile) 构建，当前环境如下：
+本地镜像由 ARC-Bench 网站仓库的 `backend/runner/Dockerfile` 构建（见 2.2），当前环境如下：
 
 | 项目 | 当前配置 |
 |---|---|

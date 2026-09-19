@@ -486,7 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         "--workspace",
         dest="workspace",
-        help="Empty host output directory; defaults to local-submit/runs/<unique-id>",
+        help="Empty host output directory; defaults to runs/<unique-id>",
     )
     run_parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     run_parser.add_argument(
