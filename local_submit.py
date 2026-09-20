@@ -319,8 +319,8 @@ def run_container(args: argparse.Namespace, workspace: Path) -> int:
         "--init",
         "--name",
         container_name,
-        "--volume",
-        f"{workspace}:/workspace:rw",
+        "--mount",
+        f"type=bind,source={workspace},target=/workspace",
     ]
     if os.name == "posix" and not args.run_as_root:
         command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])

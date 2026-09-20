@@ -17,9 +17,12 @@ hackathon-local-simulation/
 │       └── REQ-1.spec.ts           # 公开 Playwright 测试
 ├── Dockerfile                      # 本地竞赛镜像定义
 ├── build-image.sh                  # 构建并检查镜像
+├── build-image.ps1                 # Windows PowerShell 构建脚本
 ├── local_submit.py                 # 组装 Workspace、运行容器、汇总结果
 ├── submit.sh                       # 模拟提交快捷入口
+├── submit.ps1                      # Windows PowerShell 提交脚本
 ├── result.sh                       # 重新查看结果
+├── result.ps1                      # Windows PowerShell 查看结果
 └── env.example                     # 模型环境变量示例
 ```
 
@@ -53,12 +56,34 @@ hackathon-local-simulation/
 - Docker Engine 24 或更高版本；
 - Python 3.10 或更高版本；`local_submit.py` 只使用标准库。
 
+Windows 用户需要：
+
+- Windows 10/11；
+- Docker Desktop，开启 Linux containers 和 WSL 2 backend；
+- Python 3.10 或更高版本；
+- PowerShell 5.1 或 PowerShell 7。
+
 检查：
 
 ```bash
 docker version
 python3 --version
 ```
+
+Windows PowerShell 使用：
+
+```powershell
+docker version
+python --version
+```
+
+如果 PowerShell 禁止执行本地脚本，只需对当前窗口临时放行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+脚本只通过 Docker Desktop 创建 Linux 容器，不要求在 Windows 主机上安装 Node.js、Playwright 或 Linux 工具链。
 
 ### 2.2 构建本地模拟竞赛镜像
 
@@ -83,6 +108,34 @@ ARCBENCH_MONOREPO_ROOT=/path/to/arc-bench-website ./build-image.sh
 
 ```bash
 docker image inspect arcbench-local-submit:latest
+```
+
+Windows PowerShell：
+
+```powershell
+.\build-image.ps1
+docker image inspect arcbench-local-submit:latest
+```
+
+如果 Runner 基础镜像源码位于另一个本地 checkout：
+
+```powershell
+.\build-image.ps1 -MonorepoRoot 'D:\src\arc-bench-website'
+```
+
+或使用环境变量：
+
+```powershell
+$env:ARCBENCH_MONOREPO_ROOT = 'D:\src\arc-bench-website'
+.\build-image.ps1
+```
+
+如果组织者提供了已构建的基础镜像，可以不安装主平台仓库：
+
+```powershell
+docker pull registry.example.com/arcbench/runner:v1
+docker tag registry.example.com/arcbench/runner:v1 arcbench-runner:local-base
+.\build-image.ps1
 ```
 
 如果组织者已经发布镜像，选手可以直接拉取，并打上脚本期望的 tag，之后无需再设置 `ARCBENCH_MONOREPO_ROOT`：
@@ -180,12 +233,33 @@ zip -r ../my-agent.zip . \
 unzip -l ../my-agent.zip | head
 ```
 
+Windows PowerShell：
+
+```powershell
+Set-Location 'D:\agents\my-agent'
+Compress-Archive -Path .\main.py, .\requirements.txt -DestinationPath ..\my-agent.zip -Force
+```
+
+`Compress-Archive` 的参数直接列出文件，确保 `main.py` 和 `requirements.txt` 位于 ZIP 根目录，而不是包在额外的目录层级中。检查 ZIP 时可以使用：
+
+```powershell
+tar -tf ..\my-agent.zip
+```
+
 ### 2.4 准备模型环境变量
 
 ```bash
 cp env.example .env
 chmod 600 .env
 ```
+
+Windows PowerShell：
+
+```powershell
+Copy-Item .\env.example .\.env
+```
+
+`.env` 只由 Docker 读取，不要提交或发送给其他人。可以用记事本或 VS Code 编辑它。
 
 填写智能体需要的配置：
 
@@ -213,6 +287,19 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
   --env-file "$PWD/.env"
 ```
 
+Windows PowerShell 等价命令：
+
+```powershell
+.\submit.ps1 `
+  -Agent 'D:\agents\my-agent.zip' `
+  -RequirementsDir "$PWD\public-exercise\requirements" `
+  -TestsDir "$PWD\public-exercise\tests" `
+  -OutputDir "$PWD\runs\counter-run-001" `
+  -EnvFile "$PWD\.env"
+```
+
+PowerShell 版本使用命名参数，不要把 Bash 的 `--agent` 和反斜杠续行符直接复制过来。Windows 路径可以使用盘符、反斜杠和空格；脚本会将路径转换为绝对路径，Docker 使用 `--mount` 挂载到容器内的 `/workspace`。
+
 参数说明：
 
 | 参数 | 内容 |
@@ -233,6 +320,21 @@ VISUAL_MODEL=deepseek-v4-flash-vision-exp
   --agent /absolute/path/to/my-agent.zip \
   --output-dir "$PWD/runs/counter-run-001" \
   --env-file "$PWD/.env"
+```
+
+Windows PowerShell（不指定测试目录，因此不执行 Playwright）：
+
+```powershell
+.\submit.ps1 `
+  -Agent 'D:\agents\my-agent.zip' `
+  -OutputDir "$PWD\runs\deploy-only" `
+  -EnvFile "$PWD\.env"
+```
+
+PowerShell 的完整评测结果和跳过评测结果都保存在 `-OutputDir` 指定的 Windows 目录中。例如：
+
+```powershell
+Get-Content .\runs\counter-run-001\local-result.json
 ```
 
 也可以显式指定需求目录但不指定测试目录：
@@ -292,11 +394,27 @@ counter-run-001/
   --show-tests
 ```
 
+Windows PowerShell：
+
+```powershell
+.\result.ps1 `
+  -Workspace "$PWD\runs\counter-run-001" `
+  -ShowTests
+```
+
 发生错误时首先查看：
 
 ```bash
 less runs/counter-run-001/execution.debug.log
 less runs/counter-run-001/template/.arc/stdout.log
+```
+
+Windows PowerShell：
+
+```powershell
+Get-Content .\runs\counter-run-001\execution.debug.log
+Get-Content .\runs\counter-run-001\template\.arc\stdout.log
+Get-Content .\runs\counter-run-001\local-result.json
 ```
 
 ## 3. 竞赛平台依次做了什么
@@ -456,6 +574,23 @@ cd ../../..
   --requirements-dir "$PWD/public-exercise/requirements" \
   --tests-dir "$PWD/public-exercise/tests" \
   --output-dir "$PWD/runs/custom-deploy-example"
+```
+
+Windows PowerShell 可以用同一个示例。Compress-Archive 会把示例目录中的入口和部署文件放到 ZIP 根目录：
+
+```powershell
+Set-Location "$PSScriptRoot\examples\custom-deploy-agent"
+Compress-Archive `
+  -Path .\main.py, .\requirements.txt `
+  -DestinationPath "$PSScriptRoot\custom-deploy-agent.zip" `
+  -Force
+
+Set-Location $PSScriptRoot
+.\submit.ps1 `
+  -Agent "$PSScriptRoot\custom-deploy-agent.zip" `
+  -RequirementsDir "$PSScriptRoot\public-exercise\requirements" `
+  -TestsDir "$PSScriptRoot\public-exercise\tests" `
+  -OutputDir "$PSScriptRoot\runs\custom-deploy-example"
 ```
 
 日志中出现以下信息，表示 Runner 选择了自定义部署路径：
