@@ -386,7 +386,7 @@ counter-run-001/
 └── local-result.json
 ```
 
-提供测试时，终端会打印 passed、failed、测试通过率和功能实现率；未提供测试时，终端会明确显示 `evaluation_status: skipped`。之后可以重新查看：
+提供测试时，终端会打印 passed、failed、测试通过率、模型 Token、模型开销、币种和提交得分；未提供测试时，终端会明确显示 `evaluation_status: skipped`。这些字段也会写入 `local-result.json`。之后可以重新查看：
 
 ```bash
 ./result.sh \
@@ -401,6 +401,10 @@ Windows PowerShell：
   -Workspace "$PWD\runs\counter-run-001" `
   -ShowTests
 ```
+
+当 `.env` 中提供 `OPENAI_API_KEY` 时，本地提交会在运行前后查询 ARC Bench Meter（默认 `https://meter.arc-bench.com`）并计算差值。也可以通过 `.env` 中的 `ARCBENCH_METER_BASE_URL` 或 `--meter-base-url` 指定其他 Meter 门户地址。Meter 暂时不可用不会使评测失败；此时 `token_count`、`token_cost` 和正通过率对应的 `score` 为 `null`，具体原因记录在 `meter_error`。为兼容平台 API，`token_cost_usd` 是 `token_cost` 的同值别名，实际币种始终以 `token_cost_currency` 为准。
+
+本地单任务得分采用参赛须知中的同一公式：`b0 = 1.2`、奖励指数 `α = 0.1`、惩罚指数 `β = 0.2`。正式比赛会先汇总两个任务的通过数、测试数和开销再计算，因此本地单任务分数仅用于调试参考。
 
 发生错误时首先查看：
 
