@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from http.cookiejar import CookieJar
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -12,6 +15,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 import uuid
 import zipfile
 
@@ -22,6 +29,13 @@ DEFAULT_DATA_ROOT = REPOSITORY_ROOT / "data" / "competition"
 DEFAULT_RUNS_ROOT = SCRIPT_DIR / "runs"
 DEFAULT_REQUIREMENTS_DIR = SCRIPT_DIR / "public-exercise" / "requirements"
 DEFAULT_IMAGE = "arcbench-local-submit:latest"
+DEFAULT_METER_BASE_URL = "https://meter.arc-bench.com"
+METER_USAGE_WINDOW_SECONDS = 30 * 24 * 60 * 60
+METER_TIMEOUT_SECONDS = 10.0
+METER_SETTLE_TIMEOUT_SECONDS = 15.0
+EXPECTED_COST_PER_PASS_RATE_POINT = Decimal("1.2")
+REWARD_EXPONENT = Decimal("0.1")
+PENALTY_EXPONENT = Decimal("0.2")
 EXCLUDED_BASELINE_PARTS = {".arc", ".git", "requirements", "node_modules", ".cache", "dist", "build"}
 PASSTHROUGH_ENVIRONMENT = (
     "OPENAI_API_KEY",
@@ -41,6 +55,193 @@ PASSTHROUGH_ENVIRONMENT = (
 
 class LocalSubmitError(RuntimeError):
     pass
+
+
+class MeterUsageError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class MeterUsageSnapshot:
+    access_key_id: str
+    total_tokens: int
+    total_cost: Decimal
+    currency: str
+    query_start: int
+
+
+@dataclass(frozen=True)
+class MeterUsageDelta:
+    token_count: int
+    cost: Decimal
+    currency: str
+
+
+def read_environment_value(env_file: str | None, name: str) -> str:
+    """Resolve a value the same way the Docker invocation does.
+
+    Explicit process environment variables override values from --env-file.
+    """
+    if name in os.environ:
+        return os.environ[name].strip()
+    if not env_file:
+        return ""
+    path = Path(env_file).resolve()
+    if not path.is_file():
+        return ""
+    value = ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, candidate = line.split("=", 1)
+        if key.strip() != name:
+            continue
+        candidate = candidate.strip()
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"'", '"'}:
+            candidate = candidate[1:-1]
+        value = candidate
+    return value
+
+
+class MeterUsageClient:
+    """Capture token and billed-cost deltas from ARC Bench Meter."""
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise MeterUsageError("meter base URL must be an absolute HTTP(S) URL")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key.strip()
+
+    def _request_json(
+        self,
+        opener,
+        method: str,
+        path: str,
+        *,
+        payload: dict | None = None,
+        query: dict | None = None,
+    ) -> dict:
+        url = f"{self.base_url}{path}"
+        if query:
+            url = f"{url}?{urlencode(query)}"
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = Request(
+            url,
+            data=body,
+            method=method,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        try:
+            with opener.open(request, timeout=METER_TIMEOUT_SECONDS) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise MeterUsageError(f"meter request failed with HTTP {exc.code}") from exc
+        except (URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MeterUsageError(f"meter request failed: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise MeterUsageError("meter response was not a JSON object")
+        return parsed
+
+    def capture(
+        self,
+        *,
+        wait_for_settlement: bool = False,
+        query_start: int | None = None,
+    ) -> MeterUsageSnapshot:
+        if not self.api_key:
+            raise MeterUsageError("meter API key is unavailable")
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        login = self._request_json(
+            opener,
+            "POST",
+            "/api/user/login",
+            payload={"access_key": self.api_key},
+        )
+        account = login.get("account")
+        access_key_id = str(account.get("access_key_id") or "").strip() if isinstance(account, dict) else ""
+        if not access_key_id:
+            raise MeterUsageError("meter login response did not include an access-key identity")
+
+        try:
+            if wait_for_settlement:
+                deadline = time.monotonic() + METER_SETTLE_TIMEOUT_SECONDS
+                while True:
+                    freshness = self._request_json(opener, "GET", "/api/user/freshness")
+                    pending = freshness.get("pending_billing_events")
+                    if isinstance(pending, int) and pending <= 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise MeterUsageError("meter billing did not settle before the timeout")
+                    time.sleep(0.5)
+
+            captured_at = int(time.time())
+            end = captured_at + 1
+            start = max(1, int(query_start or (end - METER_USAGE_WINDOW_SECONDS)))
+            if start >= end:
+                raise MeterUsageError("meter usage window start must be before its end")
+            usage = self._request_json(
+                opener,
+                "GET",
+                "/api/user/usage",
+                query={"start": start, "end": end, "timezone": "UTC", "bucket": "week"},
+            )
+        finally:
+            try:
+                self._request_json(opener, "POST", "/api/user/logout")
+            except MeterUsageError:
+                pass
+
+        if usage.get("ok") is not True or not isinstance(usage.get("rows"), list):
+            raise MeterUsageError("meter usage response was not successful")
+        total_tokens = 0
+        total_cost = Decimal("0")
+        try:
+            for row in usage["rows"]:
+                measures = row.get("measures") if isinstance(row, dict) else None
+                if not isinstance(measures, dict):
+                    continue
+                total_tokens += int(measures.get("quantity") or 0)
+                total_cost += Decimal(str(measures.get("amount") or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise MeterUsageError("meter usage response contained invalid totals") from exc
+        return MeterUsageSnapshot(
+            access_key_id=access_key_id,
+            total_tokens=max(0, total_tokens),
+            total_cost=max(Decimal("0"), total_cost),
+            currency=str(usage.get("currency") or "").strip().upper() or "UNKNOWN",
+            query_start=start,
+        )
+
+    @staticmethod
+    def delta(start: MeterUsageSnapshot, end: MeterUsageSnapshot) -> MeterUsageDelta:
+        if start.access_key_id != end.access_key_id:
+            raise MeterUsageError("meter access-key identity changed during the run")
+        if start.currency != end.currency:
+            raise MeterUsageError("meter billing currency changed during the run")
+        return MeterUsageDelta(
+            token_count=max(0, end.total_tokens - start.total_tokens),
+            cost=max(Decimal("0"), end.total_cost - start.total_cost),
+            currency=end.currency,
+        )
+
+
+def calculate_submission_score(pass_rate: float, token_cost: float | None) -> float | None:
+    """Apply the competition score formula from 参赛须知-new(1).pdf."""
+    p = Decimal(str(pass_rate))
+    if p <= 0:
+        return 0.0
+    if token_cost is None:
+        return None
+    cost = Decimal(str(token_cost))
+    if cost <= 0:
+        # A model call is mandatory, so a positive pass rate with zero billed
+        # cost is not a valid competition score (and the formula is singular).
+        return None
+    expected_cost = EXPECTED_COST_PER_PASS_RATE_POINT * p
+    exponent = REWARD_EXPONENT if cost <= expected_cost else PENALTY_EXPONENT
+    return float(p / ((cost / expected_cost) ** exponent))
 
 
 def safe_extract_zip(archive_path: Path, destination: Path) -> None:
@@ -331,13 +532,48 @@ def run_container(args: argparse.Namespace, workspace: Path) -> int:
     command.extend(docker_environment_arguments(args.env_file))
     command.append(args.image)
 
+    meter_start: MeterUsageSnapshot | None = None
+    meter_delta: MeterUsageDelta | None = None
+    meter_error: str | None = None
+    meter_api_key = read_environment_value(args.env_file, "OPENAI_API_KEY")
+    configured_meter_url = (
+        args.meter_base_url
+        or read_environment_value(args.env_file, "ARCBENCH_METER_BASE_URL")
+        or DEFAULT_METER_BASE_URL
+    )
+    meter_client: MeterUsageClient | None = None
+    if meter_api_key:
+        try:
+            meter_client = MeterUsageClient(configured_meter_url, meter_api_key)
+            print("Capturing ARC Bench Meter baseline...", flush=True)
+            meter_start = meter_client.capture()
+        except MeterUsageError as exc:
+            meter_error = str(exc)
+            print(f"Meter baseline unavailable: {meter_error}", file=sys.stderr, flush=True)
+
     print(f"Workspace: {workspace}", flush=True)
     print(f"Container: {container_name}", flush=True)
     print("Starting the same run_submission.py used by the platform...", flush=True)
     completed = subprocess.run(command, check=False)
+    if meter_client is not None and meter_start is not None:
+        try:
+            print("Waiting for ARC Bench Meter billing...", flush=True)
+            meter_end = meter_client.capture(
+                wait_for_settlement=True,
+                query_start=meter_start.query_start,
+            )
+            meter_delta = meter_client.delta(meter_start, meter_end)
+        except MeterUsageError as exc:
+            meter_error = str(exc)
+            print(f"Final Meter usage unavailable: {meter_error}", file=sys.stderr, flush=True)
     result_metadata = {
         "container_exit_code": completed.returncode,
         "finished_at": datetime.now(timezone.utc).isoformat(),
+        "token_count": meter_delta.token_count if meter_delta else None,
+        "token_cost": float(meter_delta.cost) if meter_delta else None,
+        "token_cost_usd": float(meter_delta.cost) if meter_delta else None,
+        "token_cost_currency": meter_delta.currency if meter_delta else None,
+        "meter_error": meter_error,
     }
     (workspace / "local-run.json").write_text(
         json.dumps(result_metadata, indent=2) + "\n",
@@ -397,6 +633,12 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
             "container_exit_code": run.get("container_exit_code"),
             "agent_duration_seconds": execution.get("duration_seconds"),
             "evaluation_status": "skipped",
+            "score": None,
+            "token_count": run.get("token_count"),
+            "token_cost": run.get("token_cost"),
+            "token_cost_usd": run.get("token_cost_usd", run.get("token_cost")),
+            "token_cost_currency": run.get("token_cost_currency"),
+            "meter_error": run.get("meter_error"),
             "playwright_report": None,
             "stdout_log": str(workspace / "template" / ".arc" / "stdout.log"),
             "debug_log": str(workspace / "execution.debug.log"),
@@ -409,17 +651,39 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
         print("Playwright evaluation was skipped because no --tests-dir was provided.")
         return 0 if run.get("container_exit_code") == 0 else 1
     if not report_path.is_file():
-        print("No Playwright report was produced.")
-        print(f"Container exit code: {run.get('container_exit_code', 'unknown')}")
-        print(f"Debug log: {workspace / 'execution.debug.log'}")
-        print(f"Stdout log: {workspace / 'template' / '.arc' / 'stdout.log'}")
+        result = {
+            "workspace": str(workspace),
+            "container_exit_code": run.get("container_exit_code"),
+            "agent_duration_seconds": execution.get("duration_seconds"),
+            "evaluation_status": "failed",
+            "passed": 0,
+            "failed": 0,
+            "total": 0,
+            "score": 0.0,
+            "test_pass_rate": 0.0,
+            "token_count": run.get("token_count"),
+            "token_cost": run.get("token_cost"),
+            "token_cost_usd": run.get("token_cost_usd", run.get("token_cost")),
+            "token_cost_currency": run.get("token_cost_currency"),
+            "meter_error": run.get("meter_error"),
+            "playwright_report": None,
+            "stdout_log": str(workspace / "template" / ".arc" / "stdout.log"),
+            "debug_log": str(workspace / "execution.debug.log"),
+            "failure_reason": "No Playwright report was produced",
+        }
+        (workspace / "local-result.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return 2
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     tests = walk_playwright_report(report)
     passed = sum(1 for test in tests if test["passed"])
     failed = len(tests) - passed
-    pass_rate = round((passed / len(tests)) * 100, 1) if tests else 0.0
+    exact_pass_rate = (passed / len(tests)) * 100 if tests else 0.0
+    pass_rate = round(exact_pass_rate, 1)
     feature_outcomes: dict[str, bool] = {}
     for index, test in enumerate(tests):
         feature = str(test.get("file") or "").strip() or f"__unknown_feature_{index}"
@@ -427,6 +691,7 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
     feature_total = len(feature_outcomes)
     feature_implemented = sum(1 for implemented in feature_outcomes.values() if implemented)
     feature_rate = round((feature_implemented / feature_total) * 100, 1) if feature_total else 0.0
+    submission_score = calculate_submission_score(exact_pass_rate, run.get("token_cost"))
     result = {
         "workspace": str(workspace),
         "container_exit_code": run.get("container_exit_code"),
@@ -435,8 +700,13 @@ def read_result(workspace: Path, *, show_tests: bool = False) -> int:
         "passed": passed,
         "failed": failed,
         "total": len(tests),
-        "score": pass_rate,
+        "score": submission_score,
         "test_pass_rate": pass_rate,
+        "token_count": run.get("token_count"),
+        "token_cost": run.get("token_cost"),
+        "token_cost_usd": run.get("token_cost_usd", run.get("token_cost")),
+        "token_cost_currency": run.get("token_cost_currency"),
+        "meter_error": run.get("meter_error"),
         "feature_implemented_count": feature_implemented,
         "feature_total_count": feature_total,
         "feature_implementation_rate": feature_rate,
@@ -500,6 +770,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--image", default=os.environ.get("ARCBENCH_LOCAL_IMAGE", DEFAULT_IMAGE))
     run_parser.add_argument("--env-file", help="Docker env file containing model settings; do not commit it")
+    run_parser.add_argument(
+        "--meter-base-url",
+        help=f"ARC Bench Meter portal URL (default: ARCBENCH_METER_BASE_URL or {DEFAULT_METER_BASE_URL})",
+    )
     run_parser.add_argument("--memory", default="2g")
     run_parser.add_argument("--cpus", default="1")
     run_parser.add_argument("--run-as-root", action="store_true", help="Run as root inside Docker")
