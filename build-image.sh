@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-BASE_IMAGE="${ARCBENCH_LOCAL_BASE_IMAGE:-arcbench-runner:local-base}"
+BASE_IMAGE="${ARCBENCH_LOCAL_BASE_IMAGE:-gyataro/arcbench-runner:local-base}"
 LOCAL_IMAGE="${ARCBENCH_LOCAL_IMAGE:-arcbench-local-submit:latest}"
 PLATFORM="${ARCBENCH_LOCAL_PLATFORM:-}"
 
@@ -34,23 +34,9 @@ build_base_image() {
       echo "(set ARCBENCH_MONOREPO_ROOT to rebuild it from source)"
       return 0
     fi
-    cat >&2 <<EOF
-error: the base runner image "$BASE_IMAGE" is not available locally.
-
-It is built from backend/runner/Dockerfile in the ARC-Bench website repository,
-which is not part of this repository. Either:
-
-  1. Point this script at your checkout of that repository:
-
-       ARCBENCH_MONOREPO_ROOT=/path/to/arc-bench-website ./build-image.sh
-
-  2. Or pull a published base image and tell this script to reuse it:
-
-       docker pull <registry>/arcbench/local-submit:<tag>
-       docker tag  <registry>/arcbench/local-submit:<tag> $BASE_IMAGE
-       ./build-image.sh
-EOF
-    return 1
+    echo "Pulling base image: $BASE_IMAGE"
+    docker pull "$BASE_IMAGE"
+    return 0
   fi
 
   if [ ! -f "$MONOREPO_ROOT/backend/runner/Dockerfile" ]; then

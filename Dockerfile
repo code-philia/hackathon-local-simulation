@@ -1,4 +1,4 @@
-ARG ARCBENCH_RUNNER_IMAGE=arcbench-runner:local-base
+ARG ARCBENCH_RUNNER_IMAGE=gyataro/arcbench-runner:local-base
 FROM ${ARCBENCH_RUNNER_IMAGE}
 
 LABEL org.opencontainers.image.title="ARC-Bench local submission runner"

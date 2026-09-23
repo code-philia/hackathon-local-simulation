@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$MonorepoRoot = $env:ARCBENCH_MONOREPO_ROOT,
-    [string]$BaseImage = $(if ($env:ARCBENCH_LOCAL_BASE_IMAGE) { $env:ARCBENCH_LOCAL_BASE_IMAGE } else { "arcbench-runner:local-base" }),
+    [string]$BaseImage = $(if ($env:ARCBENCH_LOCAL_BASE_IMAGE) { $env:ARCBENCH_LOCAL_BASE_IMAGE } else { "gyataro/arcbench-runner:local-base" }),
     [string]$LocalImage = $(if ($env:ARCBENCH_LOCAL_IMAGE) { $env:ARCBENCH_LOCAL_IMAGE } else { "arcbench-local-submit:latest" }),
     [string]$Platform = $env:ARCBENCH_LOCAL_PLATFORM
 )
@@ -37,13 +37,8 @@ if ($MonorepoRoot) {
     Invoke-Docker @("run", "--rm", "--entrypoint", "python3", $BaseImage, "/opt/arcbench/smoke_test.py")
 }
 elseif (-not (Test-LocalImage $BaseImage)) {
-    throw @"
-The base image '$BaseImage' is not available locally.
-Either set ARCBENCH_MONOREPO_ROOT to the ARC-Bench website checkout, or pull/tag a published base image:
-
-  docker pull <registry>/arcbench/runner:<tag>
-  docker tag <registry>/arcbench/runner:<tag> $BaseImage
-"@
+    Write-Host "Pulling base image: $BaseImage"
+    Invoke-Docker @("pull", $BaseImage)
 }
 else {
     Write-Host "Reusing existing base image: $BaseImage"
@@ -56,4 +51,3 @@ Invoke-Docker $LocalBuildArguments
 Invoke-Docker @("run", "--rm", "--entrypoint", "python3", $LocalImage, "-m", "py_compile", "/opt/arcbench/local_runner.py")
 
 Write-Host "Built local competition image: $LocalImage"
-

@@ -87,18 +87,19 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ### 2.2 构建本地模拟竞赛镜像
 
-基础 Runner 镜像由 ARC-Bench 网站仓库的 `backend/runner/Dockerfile` 构建，**那个仓库不在本仓库里**。用 `ARCBENCH_MONOREPO_ROOT` 指向你的 checkout：
+默认情况下，构建脚本使用 Docker Hub 上的
+`gyataro/arcbench-runner:local-base`。如果本地没有这个基础 Runner 镜像，
+脚本会自动拉取，然后构建 `arcbench-local-submit:latest`：
 
 ```bash
 chmod +x build-image.sh
-ARCBENCH_MONOREPO_ROOT=/path/to/arc-bench-website ./build-image.sh
+./build-image.sh
 ```
 
 构建脚本会：
 
-1. 使用 `$ARCBENCH_MONOREPO_ROOT/backend/runner/Dockerfile` 创建基础 Runner；
-2. 执行 smoke test，确认 Python、Node.js、Git、Playwright 和 Chromium 可用；
-3. 创建本地镜像：
+1. 复用本地基础 Runner，或从 Docker Hub 自动拉取；
+2. 创建并检查本地镜像：
 
    ```text
    arcbench-local-submit:latest
@@ -117,7 +118,8 @@ Windows PowerShell：
 docker image inspect arcbench-local-submit:latest
 ```
 
-如果 Runner 基础镜像源码位于另一个本地 checkout：
+如果要从源码重建基础 Runner，它的 Dockerfile 位于 ARC-Bench 网站仓库的
+`backend/runner/Dockerfile`，**不在本仓库里**。通过参数指向该仓库：
 
 ```powershell
 .\build-image.ps1 -MonorepoRoot 'D:\src\arc-bench-website'
@@ -130,23 +132,18 @@ $env:ARCBENCH_MONOREPO_ROOT = 'D:\src\arc-bench-website'
 .\build-image.ps1
 ```
 
-如果组织者提供了已构建的基础镜像，可以不安装主平台仓库：
+也可以通过参数或环境变量改用其他基础镜像：
 
 ```powershell
-docker pull registry.example.com/arcbench/runner:v1
-docker tag registry.example.com/arcbench/runner:v1 arcbench-runner:local-base
-.\build-image.ps1
+.\build-image.ps1 -BaseImage 'registry.example.com/arcbench/runner:v1'
 ```
-
-如果组织者已经发布镜像，选手可以直接拉取，并打上脚本期望的 tag，之后无需再设置 `ARCBENCH_MONOREPO_ROOT`：
 
 ```bash
-docker pull registry.example.com/arcbench/local-submit:v1
-docker tag  registry.example.com/arcbench/local-submit:v1 arcbench-runner:local-base
-./build-image.sh
+ARCBENCH_LOCAL_BASE_IMAGE=registry.example.com/arcbench/runner:v1 ./build-image.sh
 ```
 
-运行时也可以通过 `--image registry.example.com/arcbench/local-submit:v1` 直接指定已有镜像。
+这两种方式也会在镜像本地不存在时自动拉取。运行时仍可以通过
+`--image registry.example.com/arcbench/local-submit:v1` 直接指定已有的完整本地提交镜像。
 
 #### Apple Silicon（arm64）注意
 
